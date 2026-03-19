@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.pth
+*.pt
+*.egg-info/
+dist/
+build/
+.eggs/
+.env
+.venv/
+env/
+venv/
+
+# Data
+data/
+
+# Experiment outputs
+experiments/runs/
+experiments/checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
