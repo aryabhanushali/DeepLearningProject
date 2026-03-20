@@ -1,34 +1,23 @@
-"""
-Training script for baseline and structured ResNet18 on CIFAR-10.
-
-Usage:
-    # Baseline (cross-entropy only)
-    python src/train.py --config configs/default.yaml --no-structured
-
-    # Structured loss
-    python src/train.py --config configs/default.yaml
-"""
-
 import argparse
+import csv
 import os
-import yaml
+import shutil
 import torch
 import torch.nn as nn
+import yaml
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
-
 from data.cifar10 import get_cifar10_loaders
-from models.resnet import get_resnet18
 from losses.structured_loss import StructuredLoss
+from models.resnet import get_resnet18
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--no-structured", action="store_true",
-                        help="Train baseline without structured loss")
-    parser.add_argument("--exp-name", default=None,
-                        help="Override experiment directory name")
+                        help="train baseline with cross-entropy only")
+    parser.add_argument("--exp-name", default=None)
     return parser.parse_args()
 
 
@@ -42,35 +31,35 @@ def main():
     exp_dir = os.path.join(cfg["output"]["exp_dir"], exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}  |  experiment: {exp_name}")
+    # save config so we can reproduce this exact run later
+    shutil.copy(args.config, os.path.join(exp_dir, "config.yaml"))
 
-    # Data
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device} | run: {exp_name}")
+
     train_loader, test_loader = get_cifar10_loaders(
         data_dir=cfg["data"]["data_dir"],
         batch_size=cfg["data"]["batch_size"],
         num_workers=cfg["data"]["num_workers"],
         augment=cfg["data"]["augment"],
+        subset_frac=cfg["data"].get("subset_frac", 1.0),
     )
 
-    # Model
     model = get_resnet18(
         num_classes=cfg["model"]["num_classes"],
         pretrained=cfg["model"]["pretrained"],
     ).to(device)
 
-    # Register forward hook on target layer to capture activations
+    # grab layer4 activations via a forward hook so we can pass them to
+    # the structured loss without modifying the model architecture at all
     activations = {}
-    target_layer = cfg["loss"]["target_layer"]
+    if use_structured:
+        def save_activations(module, input, output):
+            activations["feat"] = output
+        getattr(model, cfg["loss"]["target_layer"]).register_forward_hook(save_activations)
 
-    def hook_fn(module, input, output):
-        activations["feat"] = output
-
-    getattr(model, target_layer).register_forward_hook(hook_fn)
-
-    # Loss
     ce_criterion = nn.CrossEntropyLoss()
-    structured_criterion = None
+
     if use_structured:
         structured_criterion = StructuredLoss(
             grid_h=cfg["loss"]["grid_h"],
@@ -79,7 +68,7 @@ def main():
             lambda_comp=cfg["loss"]["lambda_comp"],
         )
 
-    # Optimizer
+    # SGD with momentum and cosine LR decay -- standard for CIFAR-10
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=cfg["train"]["lr"],
@@ -88,15 +77,22 @@ def main():
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg["train"]["epochs"])
 
+    # write per-epoch stats to CSV so we can plot and compare runs later
+    log_path = os.path.join(exp_dir, "log.csv")
+    log_fields = ["epoch", "train_acc", "test_acc", "loss_total",
+                  "loss_ce", "loss_smooth", "loss_comp"]
+    log_file = open(log_path, "w", newline="")
+    logger = csv.DictWriter(log_file, fieldnames=log_fields)
+    logger.writeheader()
+
     best_acc = 0.0
-    log_interval = cfg["output"]["log_interval"]
 
     for epoch in range(1, cfg["train"]["epochs"] + 1):
         model.train()
-        running = {k: 0.0 for k in ["total", "ce", "smooth", "comp"]}
+        running = {"total": 0.0, "ce": 0.0, "smooth": 0.0, "comp": 0.0}
         correct = total = 0
 
-        for step, (images, labels) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
+        for images, labels in tqdm(train_loader, desc=f"Epoch {epoch:3d}", leave=False):
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
 
@@ -116,31 +112,39 @@ def main():
             loss.backward()
             optimizer.step()
 
-            preds = logits.argmax(dim=1)
-            correct += (preds == labels).sum().item()
+            correct += (logits.argmax(dim=1) == labels).sum().item()
             total += labels.size(0)
-
-            if (step + 1) % log_interval == 0:
-                n = step + 1
-                print(
-                    f"  step {n:4d} | total {running['total']/n:.4f} "
-                    f"| ce {running['ce']/n:.4f} "
-                    + (f"| smooth {running['smooth']/n:.4f} | comp {running['comp']/n:.4f}"
-                       if use_structured else "")
-                )
 
         train_acc = 100.0 * correct / total
         test_acc = evaluate(model, test_loader, device)
         scheduler.step()
 
-        print(f"Epoch {epoch:3d} | train acc {train_acc:.2f}% | test acc {test_acc:.2f}%")
+        n = len(train_loader)
+        loss_str = f"loss {running['total']/n:.4f}"
+        if use_structured:
+            loss_str += (f" (ce {running['ce']/n:.3f}"
+                         f" sm {running['smooth']/n:.3f}"
+                         f" comp {running['comp']/n:.3f})")
+        print(f"Epoch {epoch:3d} | train {train_acc:.2f}% | test {test_acc:.2f}% | {loss_str}")
+
+        logger.writerow({
+            "epoch": epoch,
+            "train_acc": round(train_acc, 4),
+            "test_acc": round(test_acc, 4),
+            "loss_total": round(running["total"] / n, 6),
+            "loss_ce": round(running["ce"] / n, 6),
+            "loss_smooth": round(running["smooth"] / n, 6),
+            "loss_comp": round(running["comp"] / n, 6),
+        })
+        log_file.flush()
 
         if cfg["output"]["save_best"] and test_acc > best_acc:
             best_acc = test_acc
             torch.save(model.state_dict(), os.path.join(exp_dir, "best_model.pth"))
 
+    log_file.close()
     torch.save(model.state_dict(), os.path.join(exp_dir, "final_model.pth"))
-    print(f"Done. Best test acc: {best_acc:.2f}%")
+    print(f"done. best test acc: {best_acc:.2f}% | results in {exp_dir}")
 
 
 def evaluate(model, loader, device):
@@ -149,8 +153,7 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
-            preds = model(images).argmax(dim=1)
-            correct += (preds == labels).sum().item()
+            correct += (model(images).argmax(dim=1) == labels).sum().item()
             total += labels.size(0)
     return 100.0 * correct / total
 

@@ -1,52 +1,34 @@
-"""
-Structured regularization loss that encourages spatial organization among
-feature channels arranged on a 2-D grid.
-
-  L_total = L_CE + lambda_smooth * L_smooth + lambda_comp * L_comp
-
-  L_smooth  — local smoothness: penalize squared activation differences
-              between channels that are adjacent on the grid.
-  L_comp    — global competition: penalize cosine similarity between
-              channels that are far apart on the grid.
-"""
+# Structured loss for encouraging spatial organization in CNNs.
+# how we defined total loss:
+#   L_total = L_CE + lambda_smooth * L_smooth + lambda_comp * L_comp
+# L_smooth: neighboring channels on the grid should have similar activations
+# L_comp:   channels far apart on the grid should not learn the same features
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _build_neighbor_pairs(grid_h: int, grid_w: int, device: torch.device):
-    """Return (i, j) index pairs for all 4-connected neighbors on an H x W grid."""
+def _build_neighbor_pairs(grid_h, grid_w, device):
+    # collect all 4-connected neighbor pairs (right and down only to avoid duplicates)
     pairs = []
     for r in range(grid_h):
         for c in range(grid_w):
             idx = r * grid_w + c
             if c + 1 < grid_w:
-                pairs.append((idx, r * grid_w + (c + 1)))   # right
+                pairs.append((idx, r * grid_w + (c + 1)))
             if r + 1 < grid_h:
-                pairs.append((idx, (r + 1) * grid_w + c))   # down
+                pairs.append((idx, (r + 1) * grid_w + c))
     i_idx = torch.tensor([p[0] for p in pairs], dtype=torch.long, device=device)
     j_idx = torch.tensor([p[1] for p in pairs], dtype=torch.long, device=device)
     return i_idx, j_idx
 
 
 class StructuredLoss(nn.Module):
-    """
-    Args:
-        grid_h, grid_w : dimensions of the virtual channel grid.
-                         grid_h * grid_w must equal the number of channels
-                         in the hooked activation tensor.
-        lambda_smooth  : weight for the local smoothness term.
-        lambda_comp    : weight for the global competition term.
-    """
+    # grid_h * grid_w must equal the number of channels in the target layer
+    # (512 for ResNet18 layer4, so we use a 16x32 grid)
 
-    def __init__(
-        self,
-        grid_h: int,
-        grid_w: int,
-        lambda_smooth: float = 0.01,
-        lambda_comp: float = 0.001,
-    ):
+    def __init__(self, grid_h, grid_w, lambda_smooth=0.01, lambda_comp=0.001):
         super().__init__()
         self.grid_h = grid_h
         self.grid_w = grid_w
@@ -54,53 +36,48 @@ class StructuredLoss(nn.Module):
         self.lambda_smooth = lambda_smooth
         self.lambda_comp = lambda_comp
 
+        # these get built the first time forward is called and cached after that
         self._neighbor_i = None
         self._neighbor_j = None
+        self._dist_weights = None
+        self._cached_device = None
 
-    def _ensure_neighbors(self, device: torch.device):
-        if self._neighbor_i is None or self._neighbor_i.device != device:
-            self._neighbor_i, self._neighbor_j = _build_neighbor_pairs(
-                self.grid_h, self.grid_w, device
-            )
+    def _ensure_cached(self, device):
+        if self._cached_device == device:
+            return
+        self._neighbor_i, self._neighbor_j = _build_neighbor_pairs(
+            self.grid_h, self.grid_w, device
+        )
+        # precompute a (C, C) matrix of normalized grid distances between channels
+        # used to weight the competition loss so distant pairs are penalized more
+        c = self.num_channels
+        rows = torch.arange(c, device=device) // self.grid_w
+        cols = torch.arange(c, device=device) % self.grid_w
+        dist = ((rows[:, None] - rows[None, :]).float() ** 2 +
+                (cols[:, None] - cols[None, :]).float() ** 2).sqrt()
+        self._dist_weights = dist / dist.max()
+        self._cached_device = device
 
-    def smooth_loss(self, activations: torch.Tensor) -> torch.Tensor:
-        """
-        activations : (B, C, H, W) or (B, C) — spatial dims are avg-pooled away.
-        """
-        if activations.dim() == 4:
-            a = activations.mean(dim=(2, 3))   # (B, C)
-        else:
-            a = activations                     # (B, C)
-
-        self._ensure_neighbors(a.device)
-        diff = a[:, self._neighbor_i] - a[:, self._neighbor_j]   # (B, num_pairs)
+    def smooth_loss(self, activations):
+        # average-pool spatial dims so each channel is a single scalar per image
+        a = activations.mean(dim=(2, 3)) if activations.dim() == 4 else activations
+        self._ensure_cached(a.device)
+        diff = a[:, self._neighbor_i] - a[:, self._neighbor_j]
         return (diff ** 2).mean()
 
-    def competition_loss(self, activations: torch.Tensor) -> torch.Tensor:
-        """
-        Penalize cosine similarity between all pairs of channels (not just neighbors).
-        activations : (B, C, H, W) or (B, C)
-        """
-        if activations.dim() == 4:
-            a = activations.mean(dim=(2, 3))   # (B, C)
-        else:
-            a = activations
+    def competition_loss(self, activations):
+        # penalize cosine similarity between channels, scaled by their distance
+        # on the grid so far-apart channels are pushed to learn different things
+        a = activations.mean(dim=(2, 3)) if activations.dim() == 4 else activations
+        self._ensure_cached(a.device)
 
-        # a : (B, C) — treat each channel vector across the batch dimension
-        # Normalise along batch dimension to get unit vectors per channel
-        a_t = a.T                              # (C, B)
-        a_norm = F.normalize(a_t, dim=1)       # (C, B)
-        sim_matrix = a_norm @ a_norm.T         # (C, C)
+        a_norm = F.normalize(a.T, dim=1)       # (C, B) -- unit vectors per channel
+        sim_matrix = a_norm @ a_norm.T          # (C, C) pairwise cosine similarities
 
-        # Exclude self-similarity (diagonal)
         mask = ~torch.eye(self.num_channels, dtype=torch.bool, device=a.device)
-        return sim_matrix[mask].mean()
+        return (sim_matrix * self._dist_weights)[mask].mean()
 
-    def forward(
-        self,
-        ce_loss: torch.Tensor,
-        activations: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
+    def forward(self, ce_loss, activations):
         l_smooth = self.smooth_loss(activations)
         l_comp = self.competition_loss(activations)
         total = ce_loss + self.lambda_smooth * l_smooth + self.lambda_comp * l_comp
