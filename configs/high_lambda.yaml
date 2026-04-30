@@ -1,0 +1,39 @@
+model:
+  name: resnet18
+  pretrained: false
+  num_classes: 10
+
+data:
+  dataset: cifar10
+  data_dir: ./data
+  batch_size: 128
+  num_workers: 0
+  augment: true
+  subset_frac: 1.0
+
+train:
+  epochs: 30
+  optimizer: sgd
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  lr_scheduler: cosine
+
+# High lambda: forces strong spatial organization on layer3.
+# lambda_smooth=0.5 means the smooth loss contributes ~20% of the total loss,
+# which is enough to visibly force neighboring channels to be similar.
+# warmup_epochs=3 prevents the large lambda from disrupting epoch 1 (when raw
+# smooth loss is ~0.5, giving a weighted contribution of 0.25 -- nearly equal
+# to CE). With warmup, lambda ramps 0 → 0.5 over the first 3 epochs.
+loss:
+  type: smooth_only
+  lambda_smooth: 0.5
+  lambda_comp: 0.0
+  warmup_epochs: 3
+  grid_h: 16
+  grid_w: 16
+  target_layer: layer3
+
+output:
+  exp_dir: ./experiments
+  save_best: true

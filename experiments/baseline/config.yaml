@@ -11,11 +11,11 @@ data:
   batch_size: 128
   num_workers: 0
   augment: true
-  subset_frac: 0.2   # use 20% of training data (10k samples) for faster runs
+  subset_frac: 1.0
 
 # Training
 train:
-  epochs: 10
+  epochs: 30
   optimizer: sgd
   lr: 0.1
   momentum: 0.9

@@ -16,5 +16,6 @@ env/
 
 data/
 
-experiments/runs/
-experiments/checkpoints/
+experiments/*/final_model.pth
+
+.DS_Store

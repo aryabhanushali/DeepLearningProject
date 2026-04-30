@@ -1,0 +1,38 @@
+model:
+  name: resnet18
+  pretrained: false
+  num_classes: 10
+
+data:
+  dataset: cifar10
+  data_dir: ./data
+  batch_size: 128
+  num_workers: 0
+  augment: true
+  subset_frac: 0.2
+
+train:
+  epochs: 10
+  optimizer: sgd
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  lr_scheduler: cosine
+
+# Adaptive grid: every reassign_every epochs, channels are reassigned to
+# grid positions based on their learned cosine similarity (spectral embedding).
+# Similar channels end up as neighbors, so the smooth loss reinforces natural
+# feature structure rather than fighting arbitrary assignments.
+# This mirrors how Self-Organizing Maps work: topology adapts to data.
+loss:
+  type: adaptive
+  lambda_smooth: 0.1
+  lambda_comp: 0.0
+  reassign_every: 2
+  grid_h: 16
+  grid_w: 16
+  target_layer: layer3
+
+output:
+  exp_dir: ./experiments
+  save_best: true

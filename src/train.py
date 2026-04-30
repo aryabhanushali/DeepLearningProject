@@ -9,6 +9,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 from data.cifar10 import get_cifar10_loaders
 from losses.structured_loss import StructuredLoss
+from losses.alternative_losses import SmoothOnlyLoss
+from losses.adaptive_loss import AdaptiveSpatialLoss
 from models.resnet import get_resnet18
 
 
@@ -31,7 +33,6 @@ def main():
     exp_dir = os.path.join(cfg["output"]["exp_dir"], exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
-    # save config so we can reproduce this exact run later
     shutil.copy(args.config, os.path.join(exp_dir, "config.yaml"))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,25 +51,33 @@ def main():
         pretrained=cfg["model"]["pretrained"],
     ).to(device)
 
-    # grab layer4 activations via a forward hook so we can pass them to
-    # the structured loss without modifying the model architecture at all
+    # hook into the target layer to grab activations for the spatial loss
     activations = {}
     if use_structured:
-        def save_activations(module, input, output):
+        def save_activations(_module, _input, output):
             activations["feat"] = output
         getattr(model, cfg["loss"]["target_layer"]).register_forward_hook(save_activations)
 
     ce_criterion = nn.CrossEntropyLoss()
 
     if use_structured:
-        structured_criterion = StructuredLoss(
-            grid_h=cfg["loss"]["grid_h"],
-            grid_w=cfg["loss"]["grid_w"],
-            lambda_smooth=cfg["loss"]["lambda_smooth"],
-            lambda_comp=cfg["loss"]["lambda_comp"],
-        )
+        loss_type = cfg["loss"].get("type", "structured")
+        gh, gw = cfg["loss"]["grid_h"], cfg["loss"]["grid_w"]
+        ls, lc = cfg["loss"]["lambda_smooth"], cfg["loss"]["lambda_comp"]
 
-    # SGD with momentum and cosine LR decay -- standard for CIFAR-10
+        if loss_type == "smooth_only":
+            structured_criterion = SmoothOnlyLoss(gh, gw, lambda_smooth=ls)
+        elif loss_type == "adaptive":
+            structured_criterion = AdaptiveSpatialLoss(
+                gh, gw, lambda_smooth=ls,
+                reassign_every=cfg["loss"].get("reassign_every", 2),
+            )
+        else:
+            structured_criterion = StructuredLoss(gh, gw, lambda_smooth=ls, lambda_comp=lc)
+
+        _base_lambda_smooth = ls
+        _warmup_epochs = cfg["loss"].get("warmup_epochs", 0)
+
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=cfg["train"]["lr"],
@@ -77,7 +86,6 @@ def main():
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg["train"]["epochs"])
 
-    # write per-epoch stats to CSV so we can plot and compare runs later
     log_path = os.path.join(exp_dir, "log.csv")
     log_fields = ["epoch", "train_acc", "test_acc", "loss_total",
                   "loss_ce", "loss_smooth", "loss_comp"]
@@ -88,6 +96,10 @@ def main():
     best_acc = 0.0
 
     for epoch in range(1, cfg["train"]["epochs"] + 1):
+        if use_structured and _warmup_epochs > 0:
+            scale = min((epoch - 1) / _warmup_epochs, 1.0)
+            structured_criterion.lambda_smooth = _base_lambda_smooth * scale
+
         model.train()
         running = {"total": 0.0, "ce": 0.0, "smooth": 0.0, "comp": 0.0}
         correct = total = 0
@@ -100,7 +112,9 @@ def main():
             ce_loss = ce_criterion(logits, labels)
 
             if use_structured:
-                loss, metrics = structured_criterion(ce_loss, activations["feat"])
+                loss, metrics = structured_criterion(
+                    ce_loss, activations["feat"], labels=labels
+                )
                 running["ce"] += metrics["loss/ce"]
                 running["smooth"] += metrics["loss/smooth"]
                 running["comp"] += metrics["loss/comp"]
@@ -118,6 +132,9 @@ def main():
         train_acc = 100.0 * correct / total
         test_acc = evaluate(model, test_loader, device)
         scheduler.step()
+
+        if use_structured and hasattr(structured_criterion, "maybe_reassign"):
+            structured_criterion.maybe_reassign(epoch)
 
         n = len(train_loader)
         loss_str = f"loss {running['total']/n:.4f}"
