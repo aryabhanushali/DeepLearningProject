@@ -14,11 +14,12 @@ OUT_DIR = "experiments/figures"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 ALL_EXPERIMENTS = [
-    ("baseline",           "configs/default.yaml",            "Baseline (CE only)"),
-    ("structured",         "configs/default.yaml",            "Original (L4 smooth+comp)"),
-    ("layer3_smooth_only", "configs/layer3_smooth_only.yaml", "L3 smooth only"),
-    ("high_lambda",        "configs/high_lambda.yaml",        "L3 high-λ (0.5)"),
-    ("adaptive",           "configs/adaptive.yaml",           "L3 adaptive grid"),
+    ("baseline",             "configs/default.yaml",              "Baseline (CE only)"),
+    ("structured",           "configs/default.yaml",              "Original (L4 smooth+comp)"),
+    ("layer3_smooth_only",   "configs/layer3_smooth_only.yaml",   "L3 smooth only"),
+    ("high_lambda",          "configs/high_lambda.yaml",          "L3 high-λ (0.5)"),
+    ("adaptive",             "configs/adaptive.yaml",             "L3 adaptive grid"),
+    ("layer3_medium_lambda", "configs/layer3_medium_lambda.yaml", "L3 medium-λ (0.1)"),
 ]
 
 
@@ -116,6 +117,7 @@ def fig_accuracy_vs_score(cache):
         "layer3_smooth_only": "#ff7f0e",
         "high_lambda": "#9467bd",
         "adaptive": "#2ca02c",
+        "layer3_medium_lambda": "#8c564b",
     }
 
     for exp, cfg_path, label in ALL_EXPERIMENTS:

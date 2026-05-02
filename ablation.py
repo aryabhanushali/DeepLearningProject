@@ -22,15 +22,16 @@ from losses.adaptive_loss import AdaptiveSpatialLoss
 
 
 ALL_EXPERIMENTS = [
-    ("baseline",           "configs/default.yaml",            "Baseline (CE only)"),
-    ("structured",         "configs/default.yaml",            "Original (L4 smooth+comp)"),
-    ("layer3_smooth_only", "configs/layer3_smooth_only.yaml", "L3 smooth only"),
-    ("high_lambda",        "configs/high_lambda.yaml",        "L3 high-λ (0.5)"),
-    ("adaptive",           "configs/adaptive.yaml",           "L3 adaptive grid"),
+    ("baseline",             "configs/default.yaml",              "Baseline (CE only)"),
+    ("structured",           "configs/default.yaml",              "Original (L4 smooth+comp)"),
+    ("layer3_smooth_only",   "configs/layer3_smooth_only.yaml",   "L3 smooth only"),
+    ("high_lambda",          "configs/high_lambda.yaml",          "L3 high-λ (0.5)"),
+    ("adaptive",             "configs/adaptive.yaml",             "L3 adaptive grid"),
+    ("layer3_medium_lambda", "configs/layer3_medium_lambda.yaml", "L3 medium-λ (0.1)"),
 ]
 
 # only train these if they don't have checkpoints yet
-TO_TRAIN = ["high_lambda", "adaptive"]
+TO_TRAIN = ["layer3_medium_lambda"]
 
 
 def _build_criterion(cfg):

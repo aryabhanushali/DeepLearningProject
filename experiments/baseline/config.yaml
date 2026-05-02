@@ -15,7 +15,7 @@ data:
 
 # Training
 train:
-  epochs: 30
+  epochs: 20
   optimizer: sgd
   lr: 0.1
   momentum: 0.9
