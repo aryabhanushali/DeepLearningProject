@@ -14,7 +14,7 @@ env/
 .env
 
 
-data/
+/data/
 
 experiments/*/final_model.pth
 
